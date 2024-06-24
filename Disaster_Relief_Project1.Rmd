@@ -1,6 +1,6 @@
 ---
-title: "EDA for Project 1"
-author: "Alanna Hazlett"
+title: "Disaster Relief Project 1"
+author: "Alanna Hazlett/Etienne Jimenez/Venkat Viswanathan"
 date: "2024-06-13"
 output: html_document
 ---
@@ -259,7 +259,7 @@ For each model, determine the threshold that maximizes the J-index using the tra
 performance_logreg<-logreg_fit %>% 
                     augment(binary_training_data) %>% 
                     probably::threshold_perf(Class, `.pred_Blue Tarp`, 
-                    thresholds=seq(0.05, 0.95, 0.01), event_level="first",
+                    thresholds=seq(0.01, 0.50, 0.001), event_level="first",
                     metrics=metric_set(j_index))
 logreg_max_j_index <- performance_logreg %>% 
     #filter(.metric == "j_index") %>% 
@@ -268,7 +268,7 @@ logreg_max_j_index <- performance_logreg %>%
 performance_LDA<-LDA_fit %>% 
                     augment(binary_training_data) %>% 
                     probably::threshold_perf(Class, `.pred_Blue Tarp`, 
-                    thresholds=seq(0.05, 0.95, 0.01), event_level="first",
+                    thresholds=seq(0.01, 0.50, 0.001), event_level="first",
                     metrics=metric_set(j_index))
 LDA_max_j_index <- performance_LDA %>% 
     #filter(.metric == "j_index") %>% 
@@ -278,7 +278,7 @@ LDA_max_j_index <- performance_LDA %>%
 performance_QDA<-QDA_fit  %>% 
                     augment(binary_training_data) %>% 
                     probably::threshold_perf(Class, `.pred_Blue Tarp`, 
-                    thresholds=seq(0.05, 0.95, 0.01), event_level="first",
+                    thresholds=seq(0.01, 0.50, 0.001), event_level="first",
                     metrics=metric_set(j_index))
 QDA_max_j_index <- performance_QDA %>% 
     #filter(.metric == "j_index") %>% 
@@ -303,14 +303,14 @@ Determine the accuracy, sensitivity, specificity, and J-index for each model at 
 augment_model<-function(model,data,thresh_level){
   model %>% 
     augment(data) %>% 
-    mutate(pred=as.factor(ifelse(`.pred_Blue Tarp`>= thresh_level,`Blue Tarp`,`Not Blue Tarp`)))
+    mutate(pred=as.factor(ifelse(`.pred_Blue Tarp`>= thresh_level,"BlueTarp","NotBlueTarp")))
 }
 ```
 
 ```{r augmenting dataset for each model}
 logreg_fit %>% 
     augment(binary_training_data) %>% 
-    mutate(pred=as.factor(ifelse(`.pred_Blue Tarp`>= 0.05,`Blue Tarp`,`Not Blue Tarp`)))
+    mutate(pred=as.factor(ifelse(`.pred_Blue Tarp`>= 0.05,"BlueTarp","NotBlueTarp")))
 ```
 
 
