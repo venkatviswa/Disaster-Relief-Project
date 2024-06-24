@@ -1,0 +1,385 @@
+---
+title: "EDA for Project 1"
+author: "Alanna Hazlett"
+date: "2024-06-13"
+output: html_document
+---
+
+```{r}
+# | message: FALSE
+library(tidyverse)
+library(tidymodels)
+library(reshape2) # for melt function needed for graph
+library(patchwork)
+library(probably)  # for threshold_perf
+library(doParallel) # for parallel processing
+library(discrim)
+```
+
+
+Load Data
+```{r}
+# | message: FALSE
+# | warning: FALSE
+
+## load training data
+training_data<-read_csv("HaitiPixels.csv")
+training_data<-training_data %>% 
+    mutate(Class = as.factor(Class))
+
+
+## load test data
+colnames<-c("B1","B2","B3")
+
+load_text_file <- function(dir,file_path,skip) {
+  df <- readr::read_table(paste0(dir,"/", file_path),skip=skip,col_names = FALSE)
+  df<-df %>% 
+    select((ncol(df)-2):ncol(df)) %>% 
+    set_names(colnames)
+  return(df)
+}
+
+dir<-"HoldOutData"
+
+df1<-load_text_file(dir,"orthovnir057_ROI_NON_Blue_Tarps.txt",8)
+df2<-load_text_file(dir,"orthovnir067_ROI_Blue_Tarps_data.txt",1)
+df3<-load_text_file(dir,"orthovnir067_ROI_Blue_Tarps.txt",8)
+df4<-load_text_file(dir,"orthovnir067_ROI_NOT_Blue_Tarps.txt",8)
+df5<-load_text_file(dir,"orthovnir069_ROI_Blue_Tarps.txt",8)
+df6<-load_text_file(dir,"orthovnir069_ROI_NOT_Blue_Tarps.txt",8)
+df7<-load_text_file(dir,"orthovnir078_ROI_Blue_Tarps.txt",8)
+df8<-load_text_file(dir,"orthovnir078_ROI_NON_Blue_Tarps.txt",8)
+
+holdoutdata<-bind_rows(df1,df2,df4,df5,df6,df7,df8)
+# colnames(holdoutdata) <- c("B1", "B2", "B3")
+
+```
+```{r}
+summary(training_data)
+#There are no missing values
+#training_data[!complete.cases(training_data),]
+
+```
+
+```{r}
+#| fig.width: 15
+#| fig.height: 5
+data_long<-training_data %>% 
+  reshape2::melt()
+g1<-ggplot(training_data,aes(x=Class))+
+  geom_bar()+
+  labs(title="Count of Class")
+g2<-training_data %>% 
+  group_by(Class) %>% 
+  summarize(counts=n()) %>% 
+  mutate(percent=counts/nrow(training_data)) %>% 
+    ggplot(aes(x=Class,y=percent))+
+      geom_bar(stat="identity")+
+      labs(x="Class",y="Proportion",title="Proportion of Class of Images")  
+g3<-ggplot(training_data,aes(x=Red))+
+  geom_histogram(bins=15,fill="red")+
+  labs(title="Distribution of Red")
+g4<-ggplot(training_data,aes(x=Green))+
+  geom_histogram(bins=15,fill="green")+
+  labs(title="Distribution of Green")
+g5<-ggplot(training_data,aes(x=Blue))+
+  geom_histogram(bins=15,fill="blue")+
+  labs(title="Distribution of Blue")
+g6<-training_data %>% 
+  melt() %>% 
+  mutate(Color=as.factor(variable)) %>% 
+  ggplot( aes(x=Class, y=value, fill=Color))+
+  geom_boxplot()+
+  labs(x="Class", y="Value", title="Training Data Distribution of Color Value by Class")
+
+g1 + g2 
+
+g6
+```
+
+```{r}
+#Get rid of scientific notation
+options(scipen=999)
+gh1<-ggplot(holdoutdata,aes(x=B1))+
+  geom_histogram(bins=15)+
+  labs(title="Distribution of B1")
+gh2<-ggplot(holdoutdata,aes(x=B2))+
+  geom_histogram(bins=15)+
+  labs(title="Distribution of B2")
+gh3<-ggplot(holdoutdata,aes(x=B3))+
+  geom_histogram(bins=15)+
+  labs(title="Distribution of B3")
+
+g3 + gh1 #Maybe Red, large count near 250, most density around 50-125
+g4 + gh2 #Maybe green, compared to B3 this does have significant count near 250. I propose green is more likely to retain higher pixel values than blue due to it's presence in nature. 
+g5 + gh3 #Maybe blue majority of density is lower for B3 than for B1 or B2. 
+```
+\
+* B1 appears similar to Red in distribution, there is a large count near 250 with most density around 50-125 pixels.
+* B2 appears similar to Green in distribution. B2 compared to B3 has a more significant count near 250. We propose green is more likely to retain higher pixel values than blue due to it's presence in nature. B2's highest density is a higher pixel value that of B3, which aligns with Green and Blue respectively. 
+* B3 appears similar to Blue in distribution. For Blue the majority of density is lower than Red or Green and this holds true for B3 compared to B1 or B2. 
+
+# ADD PROPORTION CODE HERE
+
+Adjust Holdout Set to assign Red, Green, Blue to B1, B2, and B3. 
+
+```{r}
+colSums(is.na(holdoutdata))
+```
+
+```{r}
+#New name = Old name
+
+holdoutdata<-rename(holdoutdata, Red = B1)
+holdoutdata<-rename(holdoutdata, Green = B2)
+holdoutdata<-rename(holdoutdata, Blue = B3)
+```
+
+
+Make computing cluster
+```{r}
+
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+Train the models
+```{r}
+binary_training_data<-training_data %>% 
+  mutate(Class = as.factor(ifelse(Class=="Blue Tarp","Blue Tarp","Not Blue Tarp")))
+formula <- Class ~ `Red` + `Green` + `Blue`
+haiti_recipe <- recipe(formula, data=binary_training_data) %>%
+    step_normalize(all_numeric_predictors())
+logreg_spec <- logistic_reg(mode="classification") %>%
+      set_engine('glm')
+lda_spec <- discrim_linear(mode="classification") %>%
+      set_engine('MASS')
+qda_spec <- discrim_quad(mode="classification") %>%
+      set_engine('MASS')
+```
+
+Combine preprocessing steps and model specification in workflow
+```{r}
+#Needed to use discrim for this chunk, because the response was more than 2 classes
+#library(discrim)
+logreg_wf <- workflow() %>%
+    add_recipe(haiti_recipe) %>%
+    add_model(logreg_spec)
+lda_wf <- workflow() %>%
+    add_recipe(haiti_recipe) %>%
+    add_model(lda_spec)
+qda_wf <- workflow() %>%
+    add_recipe(haiti_recipe) %>%
+    add_model(qda_spec)
+```
+
+Cross-validation for model selection
+- 10-fold cross-validation using stratified sampling
+- Measure performance using ROC-AUC
+- Save resample predictions, so that we can build ROC curves using cross-validation results
+```{r}
+resamples <- vfold_cv(binary_training_data, v=10, strata=Class)
+model_metrics <- metric_set(roc_auc, accuracy,kap,j_index)
+
+#When it performs resampling, default setting does not keep any info about results of each fold. Later when you want to do ROC Curve for cross validation results, you need the predictions. This specifies that you save the predictions. 
+cv_control <- control_resamples(save_pred=TRUE)
+```
+
+Cross-validation
+```{r cross-validation}
+logreg_cv <- fit_resamples(logreg_wf, resamples, metrics=model_metrics, control=cv_control)
+# use the following command if something goes wrong
+show_notes(.Last.tune.result)
+lda_cv <- fit_resamples(lda_wf, resamples, metrics=model_metrics, control=cv_control)
+qda_cv <- fit_resamples(qda_wf, resamples, metrics=model_metrics, control=cv_control)
+```
+Metrics Table
+```{r cv-metrics-table}
+cv_metrics <- bind_rows(
+        collect_metrics(logreg_cv) %>% mutate(model="Logistic regression"),
+        collect_metrics(lda_cv) %>% mutate(model="LDA"),
+        collect_metrics(qda_cv) %>% mutate(model="QDA")
+    ) 
+cv_metrics %>% 
+    select(model, .metric, mean) %>%
+    pivot_wider(names_from=".metric", values_from="mean") %>%
+    knitr::kable(caption="Cross-validation performance metrics", digits=3)
+```
+\
+Visualization of the same data
+```{r cv-metrics-figure}
+#| fig.cap: Cross-validation performance metrics
+#| fig.width: 6
+#| fig.height: 3
+#| out.width: 75%
+ggplot(cv_metrics, aes(x=mean, y=model, xmin=mean-std_err, xmax=mean+std_err)) +
+    geom_point() + 
+    geom_linerange() +
+    facet_wrap(~ .metric)
+```
+\
+Conclusions:\
+* QDA: Seems to perform second best on the training data across all metrics.\
+* Logistic: Appears to perform the best across all metrics.\
+* LDA: Performed the worst across all metrics. 
+
+* We know that accuracy is not going to be a good measure for this data, since it is an imbalanced dataset. We are better off using j index which has a better balance 
+
+Overlayed ROC Curves
+Overlay:
+```{r cv-roc-curves-overlay}
+#| fig.width: 5
+#| fig.height: 3
+#| fig.cap: Overlay of cross-validation ROC curves
+roc_cv_data <- function(model_cv) {
+    cv_predictions <- collect_predictions(model_cv)
+    cv_predictions %>% 
+        roc_curve(truth=Class, `.pred_Blue Tarp`, event_level="first")
+}
+bind_rows(
+    roc_cv_data(logreg_cv) %>% mutate(model="Logistic regression"),
+    roc_cv_data(lda_cv) %>% mutate(model="LDA"),
+    roc_cv_data(qda_cv) %>% mutate(model="QDA")
+) %>%
+ggplot(aes(x=1-specificity, y=sensitivity, color=model)) +
+    geom_line()
+```
+
+Use the three models to perform metrics on the test set
+```{r}
+logreg_fit<-logreg_wf %>% fit(binary_training_data)
+LDA_fit<-lda_wf %>% fit(binary_training_data)
+QDA_fit<-qda_wf %>% fit(binary_training_data)
+```
+
+For each model, determine the threshold that maximizes the J-index using the training set. Why is the J-index a better metric than accuracy in this case? Create plots that show the dependence of the J-index from the threshold. 
+
+```{r}
+#| fig.cap: Table 2
+#| out.width: 75%
+performance_logreg<-logreg_fit %>% 
+                    augment(binary_training_data) %>% 
+                    probably::threshold_perf(Class, `.pred_Blue Tarp`, 
+                    thresholds=seq(0.05, 0.95, 0.01), event_level="first",
+                    metrics=metric_set(j_index))
+logreg_max_j_index <- performance_logreg %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+performance_LDA<-LDA_fit %>% 
+                    augment(binary_training_data) %>% 
+                    probably::threshold_perf(Class, `.pred_Blue Tarp`, 
+                    thresholds=seq(0.05, 0.95, 0.01), event_level="first",
+                    metrics=metric_set(j_index))
+LDA_max_j_index <- performance_LDA %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+performance_QDA<-QDA_fit  %>% 
+                    augment(binary_training_data) %>% 
+                    probably::threshold_perf(Class, `.pred_Blue Tarp`, 
+                    thresholds=seq(0.05, 0.95, 0.01), event_level="first",
+                    metrics=metric_set(j_index))
+QDA_max_j_index <- performance_QDA %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+Names<-c("Logistic Regression","LDA","QDA")
+
+metrics_table <- function(metrics, caption) {
+  metrics %>%
+      pivot_wider(names_from=.metric, values_from=.estimate) %>%
+      select(-.estimator) %>%
+      knitr::kable(caption=caption, digits=3) %>%
+      kableExtra::kable_styling(full_width=FALSE)
+}
+
+metrics_table(bind_cols(Names, bind_rows(logreg_max_j_index,LDA_max_j_index,QDA_max_j_index)),
+              "Thresholds")
+```
+
+Determine the accuracy, sensitivity, specificity, and J-index for each model at the determined thresholds. Which model performs best? How does this compare to the result from the ROC curves?
+```{r augmenting dataset for each model}
+augment_model<-function(model,data,thresh_level){
+  model %>% 
+    augment(data) %>% 
+    mutate(pred=as.factor(ifelse(`.pred_Blue Tarp`>= thresh_level,`Blue Tarp`,`Not Blue Tarp`)))
+}
+```
+
+```{r augmenting dataset for each model}
+logreg_fit %>% 
+    augment(binary_training_data) %>% 
+    mutate(pred=as.factor(ifelse(`.pred_Blue Tarp`>= 0.05,`Blue Tarp`,`Not Blue Tarp`)))
+```
+
+
+
+
+
+```{r}
+final_logreg<-augment_model(logreg_fit,binary_training_data,0.05)
+final_LDA<-augment_model(lda_wf,binary_training_data,0.05)
+final_QDA<-augment_model(qda_wf,binary_training_data,0.05)
+```   
+
+
+```{r}
+#This outputs a function
+class_metrics<-metric_set(accuracy,sensitivity,specificity,j_index)
+calculate_metrics <- function(model, train, test, model_name,thresh_level) {
+    roc_auc(model %>% augment(train), Class, `.pred_Blue Tarp`, event_level="second")
+    bind_rows(
+        bind_cols(
+            model=model_name,
+            dataset="train",
+            class_metrics(model %>% augment_model(train,thresh_level), 
+                          truth=Class, 
+                          estimate=pred),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="train",
+            roc_auc(model %>% augment_model(train,thresh_level),
+                    Class,
+                    `.pred_Blue Tarp`,
+                    event_level="second"),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="test",
+            class_metrics(model %>% augment_model(test,thresh_level),
+                          truth=Class,
+                          estimate=pred),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="test",
+            roc_auc(model %>% augment_model(test,thresh_level),
+                    Class,
+                    `.pred_Blue Tarp`,
+                    event_level="second"),
+        ),
+    )
+}
+```
+
+```{r}
+#accuracy, sensitivity, specificity, and J-index
+ASSJ<-bind_rows(calculate_metrics(logreg_fit,binary_training_data,holdout,"Logistic",0.05),
+          calculate_metrics(LDA_fit,binary_training_data,holdout,"LDA",0.05),
+          calculate_metrics(QDA_fit,binary_training_data,holdout,"QDA",0.05))
+metrics_table(ASSJ,"Threshold Metrics")
+```
+
+
+
+
+
+
+
+Stop cluster
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```
